@@ -32,30 +32,27 @@ def cie76(lab1: np.ndarray, lab2: np.ndarray) -> float:
 class MySDL:
 
     def __init__(self):
-        self._last_rgb: tuple[int, int, int] | None = None
+        self.filled_wells = {}
+    
+    def initialize(self):
         self.filled_wells = {}
 
-    def run_experiment(self, well: int, red: float, green: float, blue: float) -> str:
+
+    def run_experiment(self, well: int, red: float, yellow: float, blue: float) -> str:
         """
         Run a color mix experiment.
-        Generates a 200x200 solid-color image from the given RGB values (0-255)
-        and returns it.
+        Simulates the experiment to add three kinds of colored waters.
+        red, yellow, blue represents the added volume and they should be between 0 to 1.
         """
 
         if well in self.filled_wells.keys():
             return f"Failed to run experiment. The well {well} is already filled."
-        else:
-            self.filled_wells[well] = True
-        
-        r = int(np.clip(red, 0, 255))
-        g = int(np.clip(green, 0, 255))
-        b = int(np.clip(blue, 0, 255))
+        else:      
+            self.filled_wells[well] = (red, yellow, blue)
 
-        self._last_rgb = (r, g, b)
+        return "Color mix experiment done successfully."
 
-        return f"Experiment succeeded. Well {well} is now filled."
-
-    def get_color_diff(self, hex: str) -> float:
+    def get_color_diff(self, well: int, hex: str) -> float:
         """
         Get the negative CIE76 color difference between the target hex color
         and the last color set by run_experiment.
@@ -64,8 +61,8 @@ class MySDL:
         Args:
             hex: Target color as a hex string (e.g. '#FF5733' or 'FF5733').
         """
-        if self._last_rgb is None:
-            raise ValueError("run_experiment has not been called yet.")
+        if well not in self.filled_wells.keys():
+            raise ValueError(f"Error: well {well} is empty.")
 
         hex_clean = hex.lstrip("#")
         if len(hex_clean) != 6:
@@ -76,9 +73,28 @@ class MySDL:
         tb = int(hex_clean[4:6], 16)
 
         target_lab = rgb_to_lab(tr, tg, tb)
-        experiment_lab = rgb_to_lab(*self._last_rgb)
 
-        diff = cie76(target_lab, experiment_lab)
+        # Estimate color
+        r, y, b = self.filled_wells[well]
+        total = r + y + b
+        if total == 0:
+            rgb = (255, 255, 255)
+        else:
+            T = {'r': (0.90, 0.10, 0.15),
+                 'y': (0.95, 0.85, 0.05),
+                 'b': (0.10, 0.35, 0.85)}
+            f = {'r': r / total, 'y': y / total, 'b': b / total}
+
+            rgb = []
+            for i in range(3):
+                t = 1.0
+                for k in T:
+                    t *= T[k][i] ** f[k]
+                rgb.append(round(t * 255))
+
+        well_lab = rgb_to_lab(*rgb)
+
+        diff = cie76(target_lab, well_lab)
 
         return float(diff)
 
@@ -88,6 +104,7 @@ sdl = MySDL()
 mcp = FastMCP("Self-driving laboratory controller")
 mcp.tool(sdl.run_experiment)
 mcp.tool(sdl.get_color_diff)
+mcp.tool(sdl.initialize)
 
 if __name__ == "__main__":
-    mcp.run(transport="http", host="127.0.0.1", port=8001)
+    mcp.run(transport="http", host="0.0.0.0", port=8001)

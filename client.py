@@ -8,11 +8,12 @@ def propose_next_experiment():
 
 async def main():
     async with Client("http://127.0.0.1:8001/mcp") as client:
+        await client.call_tool("initialize")
         # Example workflow
         for i in range(12):
-          r, g, b = propose_next_experiment()
-          result = await client.call_tool("run_experiment", {"well": i, "red": r, "green": g, "blue": b})
+          r, y, b = propose_next_experiment()
+          result = await client.call_tool("run_experiment", {"well": i, "red": r, "yellow": y, "blue": b})
           print(result.data)
-          result = await client.call_tool("get_color_diff", {"hex": "#00FF00"})
+          result = await client.call_tool("get_color_diff", {"well": i, "hex": "#00FF00"})
           print(result.data)
 asyncio.run(main())
