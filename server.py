@@ -2,6 +2,8 @@ import numpy as np
 
 from PIL import Image as PILImage
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
+from pydantic import BaseModel
 
 # ---------------------------------------------------------------------------
 # Color conversion & difference utilities
@@ -29,6 +31,21 @@ def cie76(lab1: np.ndarray, lab2: np.ndarray) -> float:
 # SDL class
 # ---------------------------------------------------------------------------
 
+class ColorRecipe(BaseModel):
+    """Volumes used to produce one experimental color."""
+
+    red: float
+    yellow: float
+    blue: float
+
+
+class ExperimentResult(BaseModel):
+    """The well and recipe committed by a successful experiment."""
+
+    well: int
+    recipe: ColorRecipe
+
+
 class MySDL:
 
     def __init__(self):
@@ -38,25 +55,37 @@ class MySDL:
         self.filled_wells = {}
 
 
-    def run_experiment(self, well: int, red: float, yellow: float, blue: float) -> str:
+    def run_experiment(
+        self,
+        well: int,
+        red: float,
+        yellow: float,
+        blue: float,
+    ) -> ExperimentResult:
         """
         Run a color mix experiment.
         Simulates the experiment to add three kinds of colored waters.
-        red, yellow, blue represents the added volume and they should be between 0 to 1.
+        red, yellow, and blue represent added volumes between 0 and 255.
         """
 
-        if well in self.filled_wells.keys():
-            return f"Failed to run experiment. The well {well} is already filled."
-        else:      
-            self.filled_wells[well] = (red, yellow, blue)
+        for color, volume in {"red": red, "yellow": yellow, "blue": blue}.items():
+            if not 0 <= volume <= 255:
+                raise ToolError(f"{color} must be between 0 and 255.")
 
-        return "Color mix experiment done successfully."
+        if well in self.filled_wells.keys():
+            raise ToolError(f"The well {well} is already filled.")
+
+        self.filled_wells[well] = (red, yellow, blue)
+        return ExperimentResult(
+            well=well,
+            recipe=ColorRecipe(red=red, yellow=yellow, blue=blue),
+        )
 
     def get_color_diff(self, well: int, hex: str) -> float:
         """
-        Get the negative CIE76 color difference between the target hex color
-        and the last color set by run_experiment.
-        A return value of 0.0 means a perfect match; more negative means further apart.
+        Get the CIE color difference between the target hex color and the last color set
+        by run_experiment. A return value of 0.0 means a perfect match; larger values
+        mean the colors are further apart.
 
         Args:
             hex: Target color as a hex string (e.g. '#FF5733' or 'FF5733').

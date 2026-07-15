@@ -8,4 +8,8 @@ dependencies = [
     "fastmcp",
     "numpy",
     "pillow",
+    "pydantic",
 ]
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
