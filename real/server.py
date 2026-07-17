@@ -11,6 +11,8 @@ from PIL import Image as PILImage
 from skimage import color as skimage_color
 from fastmcp import FastMCP
 from fastmcp.utilities.types import Image
+from fastmcp.exceptions import ToolError
+from pydantic import BaseModel
 
 from magician import MagicianController
 from picus import PicusWired
@@ -27,9 +29,24 @@ def well_centers(cx, cy, p):
     ro = (np.arange(ROWS) - (ROWS - 1) / 2) * p
     return np.array([(cx + c, cy + r) for r in ro for c in co])
 
+class ColorRecipe(BaseModel):
+    """Volumes used to produce one experimental color."""
+
+    red: float
+    yellow: float
+    blue: float
+
+
+class ExperimentResult(BaseModel):
+    """The well and recipe committed by a successful experiment."""
+
+    well: int
+    recipe: ColorRecipe
+
 class MySDL:   
     def __init__(self):
         self.consumption = {"blue": 0, "yellow": 0, "red": 0}
+        self.filled_wells = {}
         self.z_aspirate = 40
         self.z_dispense = 55
         self.z_home = 70
@@ -43,6 +60,8 @@ class MySDL:
         self.cx = 640
         self.cy = 360
         self.p = 117
+    
+    def initialize(self):
         self.return_home()
 
     def return_home(self) -> str:
@@ -185,15 +204,33 @@ class MySDL:
         self.wash_tip()
         return f"robot added {volume} uL of {color} into well {well} successfully"
     
-    def run_experiment(self, well: int, red: float, yellow: float, blue: float) -> str:
+    def run_experiment(self, well: int, red: float, yellow: float, blue: float) -> ExperimentResult:
+        """
+        Run a color mix experiment.
+        Simulates the experiment to add three kinds of colored waters.
+        red, yellow, blue represents the added volume (mL) and they should be between 0 to 1.
+        """
+
+        for color, volume in {"red": red, "yellow": yellow, "blue": blue}.items():
+            if not 0 <= volume <= 1:
+                raise ToolError(f"{color} must be between 0 and 255.")
+        
+        if well in self.filled_wells.keys():
+            raise ToolError(f"The well {well} is already filled.")
+
         if red > 0:
             self.add_color("red", well, red)
         if yellow > 0:
             self.add_color("yellow", well, yellow)
         if blue > 0:
             self.add_color("blue", well, blue, pipetting=True)
-        
-        return "Color mix experiment done successfully."
+
+        self.filled_wells[well] = (red, yellow, blue)
+
+        return ExperimentResult(
+            well=well,
+            recipe=ColorRecipe(red=red, yellow=yellow, blue=blue),
+        )
     
     def get_image(self) -> Image:
         """
@@ -238,22 +275,27 @@ class MySDL:
             cv2.rectangle(vis, (x0, y0), (x0 + 30, y0 + 30), (255, 255, 255), 1)
         return vis
 
-    def get_color_diff(self, well:int) -> float:
-        """i番目とtarget番目(既定11)のウェルの色差をCIEDE2000で返す。
-        同一フレームから両方をサンプリングするので、照明の揺らぎの影響を受けにくい。
-        debug=True でフレーム・サンプリング領域・平均色を表示する。"""
+    def get_color_diff(self, well:int, hex: str) -> float:
+        """Get the CIEDE 20000 color difference between the target hex color and the specified well.
+        A return value of 0.0 means a perfect match; larger values mean the colors are further apart."""
         target = 11
         ret, frame = self.cap.read()
         if not ret:
             raise RuntimeError("Failed to read frame from camera")
         mean_rgb   = np.array(self.get_well_color(frame, well), dtype=float)
-        target_rgb = np.array(self.get_well_color(frame, target), dtype=float)
+        # target_rgb = np.array(self.get_well_color(frame, target), dtype=float)
+        hex_clean = hex.lstrip("#")
+        if len(hex_clean) != 6:
+            raise ToolError(f"Invalid hex color: '{hex}'. Expected 6 hex digits.")
+
+        target_rgb = (int(hex_clean[0:2], 16), int(hex_clean[2:4], 16), int(hex_clean[4:6], 16))
+        
         diff = skimage_color.deltaE_ciede2000(
             skimage_color.rgb2lab(target_rgb.reshape(1, 1, 3) / 255.0),
             skimage_color.rgb2lab(mean_rgb.reshape(1, 1, 3) / 255.0),
         )[0, 0]
 
-        return -float(diff)
+        return float(diff)
 
 if __name__ == "__main__":
     sdl = MySDL()
@@ -261,7 +303,7 @@ if __name__ == "__main__":
     # sdl.run_experiment(10, 0.1, 0.2, 0.3)
     
     mcp = FastMCP("Self-driving laboratory controller")
+    mcp.tool(sdl.initialize)
     mcp.tool(sdl.run_experiment)
-    mcp.tool(sdl.get_image)
     mcp.tool(sdl.get_color_diff)
     mcp.run(transport="http", host="0.0.0.0", port=8001)
