@@ -18,6 +18,7 @@ from magician import MagicianController
 from picus import PicusWired
 
 from typing import Any, Dict
+from datetime import datetime
 
 import nimo
 
@@ -280,6 +281,9 @@ class MySDL:
         A return value of 0.0 means a perfect match; larger values mean the colors are further apart."""
         target = 11
         ret, frame = self.cap.read()
+        filename = datetime.now().strftime("%Y%m%d-%H%M%S.jpg")
+        debug = self._draw_debug(frame)
+        cv2.imwrite(filename, debug)
         if not ret:
             raise RuntimeError("Failed to read frame from camera")
         mean_rgb   = np.array(self.get_well_color(frame, well), dtype=float)
@@ -288,7 +292,7 @@ class MySDL:
         if len(hex_clean) != 6:
             raise ToolError(f"Invalid hex color: '{hex}'. Expected 6 hex digits.")
 
-        target_rgb = (int(hex_clean[0:2], 16), int(hex_clean[2:4], 16), int(hex_clean[4:6], 16))
+        target_rgb = np.array((int(hex_clean[0:2], 16), int(hex_clean[2:4], 16), int(hex_clean[4:6], 16)), dtype=float)
         
         diff = skimage_color.deltaE_ciede2000(
             skimage_color.rgb2lab(target_rgb.reshape(1, 1, 3) / 255.0),
