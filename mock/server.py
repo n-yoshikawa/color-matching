@@ -1,5 +1,3 @@
-from __future__ import annotations
-
 from copy import deepcopy
 from math import isfinite
 from typing import Any
@@ -80,10 +78,15 @@ class DigitalTwin:
     """A small stateful twin exposing atomic laboratory actions."""
 
     def __init__(self) -> None:
+        self._reset_state()
         self.initialize()
 
-    def initialize(self) -> dict[str, Any]:
-        """Reset robot position, liquids, pipette, and action history."""
+    def reset_simulation(self) -> dict[str, Any]:
+        """Reset all simulated liquids, position, pipette state, and action history."""
+        self._reset_state()
+        return self._success("reset_simulation", {})
+
+    def _reset_state(self) -> None:
         self.location_kind = "home"
         self.location_index: int | None = None
         self.pipette_contents: dict[str, float] = {}
@@ -93,8 +96,12 @@ class DigitalTwin:
         }
         self.mix_wells = {index: {} for index in range(12)}
         self.action_trace: list[dict[str, Any]] = []
-        self._record("initialize", {})
-        return self.get_state()
+
+    def initialize(self) -> dict[str, Any]:
+        """Move to home without resetting liquids or action history."""
+        self.location_kind = "home"
+        self.location_index = None
+        return self._success("initialize", {})
 
     def return_home(self) -> dict[str, Any]:
         """Move the robot to its safe home position."""
@@ -119,7 +126,7 @@ class DigitalTwin:
         return self._success("move_mix_well", {"well": well})
 
     def move_wash_station(self) -> dict[str, Any]:
-        """Enter the wash-station state at the physical home position."""
+        """Move safely to the wash station."""
         self.location_kind = "wash_station"
         self.location_index = None
         return self._success("move_wash_station", {})
@@ -169,7 +176,7 @@ class DigitalTwin:
 
         return self._success(
             "dispense",
-            {"volume_ul": volume_ul, "blow_out": True},
+            {"volume_ul": volume_ul},
         )
 
     def get_state(self) -> dict[str, Any]:
@@ -205,9 +212,7 @@ class DigitalTwin:
             "mix_well_capacity_ul": MIX_WELL_CAPACITY_UL,
             "color_wells": COLOR_WELLS,
             "mix_wells": list(range(12)),
-            "wash_station": {
-                "shares_physical_position_with": "home",
-            },
+            "wash_station": True,
         }
 
     def read_well_color(self, well: int) -> RGB:
@@ -277,7 +282,6 @@ class DigitalTwin:
     def _success(self, action: str, arguments: dict[str, Any]) -> dict[str, Any]:
         self._record(action, arguments)
         return {
-            "ok": True,
             "action": action,
             "location": self._location(),
             "pipette_volume_ul": round(_volume(self.pipette_contents), 6),
@@ -291,7 +295,6 @@ class DigitalTwin:
                 "arguments": deepcopy(arguments),
                 "location": self._location(),
                 "pipette_volume_ul": round(_volume(self.pipette_contents), 6),
-                "status": "success",
             }
         )
 
@@ -333,6 +336,7 @@ class DigitalTwin:
 twin = DigitalTwin()
 
 mcp = FastMCP("Color matching digital twin")
+mcp.tool(twin.reset_simulation)
 mcp.tool(twin.initialize)
 mcp.tool(twin.return_home)
 mcp.tool(twin.move_color_well)
