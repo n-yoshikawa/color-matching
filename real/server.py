@@ -15,6 +15,7 @@ from skimage import color as skimage_color
 from fastmcp import FastMCP
 from fastmcp.utilities.types import Image
 from fastmcp.exceptions import ToolError
+from fastmcp.server.middleware.logging import LoggingMiddleware
 from pydantic import BaseModel
 
 from magician import MagicianController
@@ -26,10 +27,12 @@ from datetime import datetime
 import nimo
 
 ROWS, COLS = 3, 4
-SAMPLE_FRAC = 0.27   # 平均を取る円の半径 / ピッチ
+SAMPLE_FRAC = 0.2
 PIPETTE_CAPACITY_UL = 1000.0
 MIX_WELL_CAPACITY_UL = 3000.0
-COLOR_WELLS_PATH = Path(__file__).resolve().parent.parent / "config" / "color_wells.json"
+# COLOR_WELLS_PATH = Path(__file__).resolve().parent.parent / "config" / "color_wells.json"
+COLOR_WELLS_PATH = Path(__file__).resolve().parent / "config" / "color_wells.json"
+
 with COLOR_WELLS_PATH.open(encoding="utf-8") as file:
     COLOR_WELLS = {int(well): color for well, color in json.load(file).items()}
 
@@ -58,19 +61,19 @@ class MySDL:
     def __init__(self):
         self.consumption = {"blue": 0, "yellow": 0, "red": 0}
         self.filled_wells = {}
-        self.z_aspirate = 40
-        self.z_dispense = 55
+        self.z_aspirate = 51
+        self.z_dispense = 70
         self.z_home = 70
-        self.home_pose = (200, 0, self.z_home)
+        self.home_pose = (225, 0, self.z_home)
         self.dobot = MagicianController()
-        self.picus = PicusWired("47381939")
+        self.picus = PicusWired("46782479")
         self.cap = cv2.VideoCapture(1)
         self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
         self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
-        # ウェルグリッドのキャリブレーション値(calibrate.py で決めた値に置き換える)
-        self.cx = 640
-        self.cy = 360
-        self.p = 117
+        # camera setting values obtained from calibrate.py
+        self.cx = 645
+        self.cy = 356
+        self.p = 115
 
         # Minimal commanded state used for validation and structured MCP results.
         self.location_kind = "home"
@@ -80,7 +83,12 @@ class MySDL:
     def initialize(self) -> dict[str, Any]:
         """Move to home without resetting physical experiment state."""
         try:
+            self.dobot.clear_alarms()
+            # Small movement to check if initialize is succeeded
+            self.dobot.move_arm(self.home_pose[0], self.home_pose[1], self.home_pose[2]+20)
             self.dobot.move_arm(self.home_pose[0], self.home_pose[1], self.home_pose[2])
+            if self.pipette_volume_ul > 0:
+                self.picus.dispense(self.pipette_volume_ul)
         except Exception as exc:
             raise ToolError(f"failed to initialize: {exc}") from exc
         self.location_kind = "home"
@@ -91,6 +99,9 @@ class MySDL:
         """
         Move the robot arm to its predefined home position.
         """
+        if self.dobot.get_alarms() != 0:
+            raise ToolError(f"robot is in alarm state. Please initialize.")            
+
         try:
             self.dobot.move_arm(self.home_pose[0], self.home_pose[1], self.home_pose[2])
         except Exception as exc:
@@ -103,12 +114,16 @@ class MySDL:
         """
         Move the robot on the color well specified by an integer (0-indexed).
         """
+        if self.dobot.get_alarms() != 0:
+            raise ToolError(f"robot is in alarm state. Please initialize.")
+             
         if well not in COLOR_WELLS:
             raise ToolError("color well must be between 0 and 5")
 
-        x = 217 - 39 * (well // 3)
-        y = -112 - 39 * (well % 3)
+        x = 230 - 39 * (well // 3)
+        y = -90 - 39 * (well % 3)
         try:
+            # self.dobot.move_joints(j1=0)
             self.dobot.move_arm(z=self.z_home)
             self.dobot.move_arm(x=x, y=y)
         except Exception as exc:
@@ -122,11 +137,15 @@ class MySDL:
         """
         Move the robot on the mix well specified by an integer (0-indexed).
         """
+        if self.dobot.get_alarms() != 0:
+            raise ToolError(f"robot is in alarm state. Please initialize.")
+        
         self._validate_mix_well(well)
 
-        x = 217 - 25 * (well // 4)
-        y = 189 - 25 * (well % 4)
+        x = 239 - 25 * (well // 4)
+        y = 194 - 25 * (well % 4)
         try:
+            # self.dobot.move_joints(j1=0)
             self.dobot.move_arm(z=self.z_home)
             joints = self.dobot.get_current_joints()
             self.dobot.move_arm(x=x, y=y)
@@ -139,6 +158,10 @@ class MySDL:
 
     def move_wash_station(self) -> dict[str, Any]:
         """Move to the wash station, which is physically the home position."""
+        
+        if self.dobot.get_alarms() != 0:
+            raise ToolError(f"robot is in alarm state. Please initialize.")
+        
         try:
             self.dobot.move_arm(self.home_pose[0], self.home_pose[1], self.home_pose[2])
         except Exception as exc:
@@ -209,6 +232,8 @@ class MySDL:
 
         Call this function after dispensing in mix well.
         """
+        if self.dobot.get_alarms() != 0:
+            raise ToolError(f"robot is in alarm state. Please initialize.")
         vol = 1000
         try:
             self.dobot.move_arm(z=self.z_home)
@@ -311,28 +336,26 @@ class MySDL:
         return Image(path="average.jpg")
 
     def get_well_color(self, frame, i):
-        """与えられたフレームから、i番目(0..11)のウェルの平均色を(R,G,B)で返す。"""
+        """Get average color of well i from given frame in RGB."""
         fx, fy = well_centers(self.cx, self.cy, self.p)[i]
         x, y = int(round(fx)), int(round(fy))
         rs = max(2, int(SAMPLE_FRAC * self.p))
         mask = np.zeros(frame.shape[:2], np.uint8)
         cv2.circle(mask, (x, y), rs, 255, -1)
-        b, g, r, _ = cv2.mean(frame, mask=mask)   # cv2.mean は BGR 順
+        b, g, r, _ = cv2.mean(frame, mask=mask)
         return (int(round(r)), int(round(g)), int(round(b)))
 
     def _draw_debug(self, frame):
-        """フレーム上に全ウェルのサンプリング円と平均色の矩形を描いた画像を返す。"""
+        """Returns debug image with sampling circle and rectangle in average color"""
         vis = frame.copy()
         rs = max(2, int(SAMPLE_FRAC * self.p))
         for k, (fx, fy) in enumerate(well_centers(self.cx, self.cy, self.p)):
             x, y = int(round(fx)), int(round(fy))
             r, g, b = self.get_well_color(frame, k)
-            # i=黄, target=赤, その他=緑 で円を描き分け
-            col = (0, 255, 0)# if k == i else (0, 0, 255) if k == target else (0, 255, 0)
+            col = (0, 255, 0)
             cv2.circle(vis, (x, y), rs, col, 2)
-            # 取得した平均色をウェルの近く(円の右上)に矩形で表示
             x0, y0 = x + rs + 10, y - rs - 10
-            cv2.rectangle(vis, (x0, y0), (x0 + 30, y0 + 30), (b, g, r), -1)  # 塗りはBGR順
+            cv2.rectangle(vis, (x0, y0), (x0 + 30, y0 + 30), (b, g, r), -1)
             cv2.rectangle(vis, (x0, y0), (x0 + 30, y0 + 30), (255, 255, 255), 1)
         return vis
 
@@ -340,15 +363,14 @@ class MySDL:
         """Get the CIEDE 20000 color difference between the target hex color and the specified well.
         A return value of 0.0 means a perfect match; larger values mean the colors are further apart."""
         self._validate_mix_well(well)
-        target = 11
         ret, frame = self.cap.read()
         filename = datetime.now().strftime("%Y%m%d-%H%M%S.jpg")
         debug = self._draw_debug(frame)
         cv2.imwrite(filename, debug)
+        cv2.imwrite("original-" + filename, frame)
         if not ret:
             raise ToolError("Failed to read frame from camera")
         mean_rgb   = np.array(self.get_well_color(frame, well), dtype=float)
-        # target_rgb = np.array(self.get_well_color(frame, target), dtype=float)
         hex_clean = hex.lstrip("#")
         if len(hex_clean) != 6:
             raise ToolError(f"Invalid hex color: '{hex}'. Expected 6 hex digits.")
@@ -430,4 +452,27 @@ if __name__ == "__main__":
     mcp.tool(sdl.get_state)
     mcp.tool(sdl.get_labware_config)
     mcp.tool(sdl.get_color_diff)
+  
+
+    # logging settings
+    import logging
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    _formatter = logging.Formatter(
+        fmt = "%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    _stderr_handler = logging.StreamHandler(sys.stderr)
+    _stderr_handler.setFormatter(_formatter)
+    logger.addHandler(_stderr_handler)
+
+    _file_handler = logging.FileHandler("mcp.log", mode="a", encoding="utf-8")
+    _file_handler.setFormatter(_formatter)
+    logger.addHandler(_file_handler)
+
+    mcp.add_middleware(LoggingMiddleware(
+        logger=logger,
+        include_payloads=True,
+    ))
     mcp.run(transport="http", host="0.0.0.0", port=8001)
