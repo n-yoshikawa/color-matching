@@ -152,6 +152,44 @@ class DigitalTwin:
             {"volume_ul": volume_ul},
         )
 
+    def mix_well(self, volume_ul: float, cycles: int = 1) -> dict[str, Any]:
+        """Mix liquid in the current mix well without changing its contents."""
+        self._validate_volume(volume_ul)
+        if not 1 <= cycles <= 10:
+            raise ToolError("cycles must be between 1 and 10")
+        if self.location_kind != "mix_well":
+            raise ToolError("mix_well requires the robot to be at a mix well")
+        if _volume(self.pipette_contents) > 1e-9:
+            raise ToolError("mix_well requires an empty pipette")
+
+        well = self._require_location_index()
+        if _volume(self.mix_wells[well]) + 1e-9 < volume_ul:
+            raise ToolError("mix well does not contain enough liquid to mix")
+
+        return self._success(
+            "mix_well",
+            {"volume_ul": volume_ul, "cycles": cycles},
+        )
+
+    def wash_tip(
+        self,
+        volume_ul: float = 1000.0,
+        cycles: int = 1,
+    ) -> dict[str, Any]:
+        """Move to the wash station and wash the empty pipette tip."""
+        self._validate_volume(volume_ul)
+        if not 1 <= cycles <= 10:
+            raise ToolError("cycles must be between 1 and 10")
+        if _volume(self.pipette_contents) > 1e-9:
+            raise ToolError("wash_tip requires an empty pipette")
+
+        self.location_kind = "wash_station"
+        self.location_index = None
+        return self._success(
+            "wash_tip",
+            {"volume_ul": volume_ul, "cycles": cycles},
+        )
+
     def get_state(self) -> dict[str, Any]:
         """Return the observable state of the robot, pipette, and labware."""
         return {
@@ -315,6 +353,8 @@ mcp.tool(twin.move_mix_well)
 mcp.tool(twin.move_wash_station)
 mcp.tool(twin.aspirate)
 mcp.tool(twin.dispense)
+mcp.tool(twin.mix_well)
+mcp.tool(twin.wash_tip)
 mcp.tool(twin.get_state)
 mcp.tool(twin.get_labware_config)
 mcp.tool(twin.get_color_diff)

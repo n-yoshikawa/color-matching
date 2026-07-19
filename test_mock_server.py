@@ -67,6 +67,38 @@ def test_wash_station_dispense_includes_blow_out():
     assert twin.get_action_trace()[-1]["arguments"] == {"volume_ul": 1000}
 
 
+def test_mix_well_preserves_liquid_contents():
+    twin = DigitalTwin()
+    twin.move_color_well(2)
+    twin.aspirate(200)
+    twin.move_mix_well(3)
+    twin.dispense(200)
+
+    contents_before = twin.get_state()["mix_wells"][3]
+    result = twin.mix_well(150, cycles=3)
+
+    assert result["location"] == {"kind": "mix_well", "index": 3}
+    assert twin.get_state()["mix_wells"][3] == contents_before
+    assert twin.get_action_trace()[-1]["arguments"] == {
+        "volume_ul": 150,
+        "cycles": 3,
+    }
+
+
+def test_wash_tip_moves_to_wash_station():
+    twin = DigitalTwin()
+    twin.move_mix_well(3)
+
+    result = twin.wash_tip(cycles=2)
+
+    assert result["location"] == {"kind": "wash_station"}
+    assert result["pipette_volume_ul"] == 0
+    assert twin.get_action_trace()[-1]["arguments"] == {
+        "volume_ul": 1000.0,
+        "cycles": 2,
+    }
+
+
 def test_initialize_only_returns_home_without_resetting_liquids_or_trace():
     twin = DigitalTwin()
     twin.move_color_well(2)
@@ -156,6 +188,8 @@ def test_mcp_exposes_atomic_actions_but_not_composite_protocols():
         "move_wash_station",
         "aspirate",
         "dispense",
+        "mix_well",
+        "wash_tip",
         "get_state",
         "get_labware_config",
         "get_color_diff",
@@ -170,9 +204,12 @@ def test_atomic_actions_execute_through_mcp():
             await client.call_tool("aspirate", {"volume_ul": 125})
             await client.call_tool("move_mix_well", {"well": 6})
             await client.call_tool("dispense", {"volume_ul": 125})
+            await client.call_tool("mix_well", {"volume_ul": 100, "cycles": 2})
+            await client.call_tool("wash_tip")
             return await client.call_tool("get_state")
 
     result = asyncio.run(transfer_liquid())
 
     assert result.data["pipette"]["volume_ul"] == 0
     assert result.data["mix_wells"]["6"]["contents"] == {"red": 125.0}
+    assert result.data["location"] == {"kind": "wash_station"}
