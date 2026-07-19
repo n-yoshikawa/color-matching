@@ -1,50 +1,23 @@
 from copy import deepcopy
+import json
 from math import isfinite
+from pathlib import Path
 from typing import Any
 
 import numpy as np
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
-from PIL import Image as PILImage
-from pydantic import BaseModel
+from skimage import color as skimage_color
 
 
 PIPETTE_CAPACITY_UL = 1000.0
 MIX_WELL_CAPACITY_UL = 3000.0
-INITIAL_COLOR_VOLUME_UL = 8000.0
-COLOR_WELLS = {
-    0: "blue",
-    1: "yellow",
-    2: "red",
-    3: "blue",
-    4: "yellow",
-    5: "red",
-}
-
-
-class RGB(BaseModel):
-    red: int
-    green: int
-    blue: int
-
-
-def rgb_to_lab(r: int, g: int, b: int) -> np.ndarray:
-    """Convert RGB to CIE LAB representation using Pillow."""
-    # Pillow's LAB stores L in [0, 255] and a, b in [0, 255] (128 = 0),
-    # so we rescale to standard ranges: L [0, 100], a/b [-128, 127].
-    pixel = PILImage.new("RGB", (1, 1), (r, g, b)).convert("LAB").getpixel((0, 0))
-    return np.array(
-        [
-            pixel[0] / 255.0 * 100.0,
-            pixel[1] - 128.0,
-            pixel[2] - 128.0,
-        ]
-    )
-
-
-def cie76(lab1: np.ndarray, lab2: np.ndarray) -> float:
-    # Compute the CIE76 (ΔE*ab) colour difference — Euclidean distance in L*a*b*
-    return float(np.linalg.norm(lab1 - lab2))
+COLOR_WELL_VOLUME_UL = 6000.0
+COLOR_WELLS_PATH = (
+    Path(__file__).resolve().parent.parent / "config" / "color_wells.json"
+)
+with COLOR_WELLS_PATH.open(encoding="utf-8") as file:
+    COLOR_WELLS = {int(well): color for well, color in json.load(file).items()}
 
 
 def _volume(contents: dict[str, float]) -> float:
@@ -91,7 +64,7 @@ class DigitalTwin:
         self.location_index: int | None = None
         self.pipette_contents: dict[str, float] = {}
         self.color_wells = {
-            index: {color: INITIAL_COLOR_VOLUME_UL}
+            index: {color: COLOR_WELL_VOLUME_UL}
             for index, color in COLOR_WELLS.items()
         }
         self.mix_wells = {index: {} for index in range(12)}
@@ -215,21 +188,19 @@ class DigitalTwin:
             "wash_station": True,
         }
 
-    def read_well_color(self, well: int) -> RGB:
-        """Return the predicted RGB color of a mix well."""
-        self._validate_mix_well(well)
-        red, green, blue = self._predict_rgb(self.mix_wells[well])
-        return RGB(red=red, green=green, blue=blue)
-
     def get_color_diff(self, well: int, hex: str) -> float:
-        """Return the simulated CIE76 difference from a target hex color."""
+        """Return the simulated CIEDE2000 difference from a target hex color."""
         self._validate_mix_well(well)
         if not self.mix_wells[well]:
             raise ToolError(f"mix well {well} is empty")
 
-        target_rgb = self._parse_hex(hex)
-        measured_rgb = self._predict_rgb(self.mix_wells[well])
-        return cie76(rgb_to_lab(*target_rgb), rgb_to_lab(*measured_rgb))
+        target_rgb = np.array(self._parse_hex(hex), dtype=float)
+        measured_rgb = np.array(self._predict_rgb(self.mix_wells[well]), dtype=float)
+        difference = skimage_color.deltaE_ciede2000(
+            skimage_color.rgb2lab(target_rgb.reshape(1, 1, 3) / 255.0),
+            skimage_color.rgb2lab(measured_rgb.reshape(1, 1, 3) / 255.0),
+        )[0, 0]
+        return float(difference)
 
     def _validate_mix_well(self, well: int) -> None:
         if well not in self.mix_wells:
@@ -345,10 +316,9 @@ mcp.tool(twin.move_wash_station)
 mcp.tool(twin.aspirate)
 mcp.tool(twin.dispense)
 mcp.tool(twin.get_state)
-mcp.tool(twin.get_action_trace)
 mcp.tool(twin.get_labware_config)
-mcp.tool(twin.read_well_color)
 mcp.tool(twin.get_color_diff)
+
 
 
 if __name__ == "__main__":
