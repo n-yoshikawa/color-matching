@@ -27,7 +27,7 @@ class MagicianController:
             dType.SetQueuedCmdStartExec(self.api)
 
             #Async Motion Params Setting
-            dType.SetHOMEParams(self.api, 200, 0, 0, 0, isQueued = 1)
+            dType.SetHOMEParams(self.api, 200, 0, 70, 0, isQueued = 1)
             dType.SetPTPJointParams(self.api, 100, 100, 100, 100, 100, 100, 100, 100, isQueued = 1)
             self.lastIndex = dType.SetPTPCommonParams(self.api, 100, 100, isQueued = 1)[0]
         else:
@@ -36,6 +36,13 @@ class MagicianController:
     def wait(self):
         while self.lastIndex > dType.GetQueuedCmdCurrentIndex(self.api)[0]:
             dType.dSleep(100)
+    
+    def get_alarms(self):
+        alarm = int.from_bytes(dType.GetAlarmsState(self.api)[0])
+        return alarm
+    
+    def clear_alarms(self):
+        dType.ClearAllAlarmsState(self.api)
     
     def homing(self, wait=True):
         #Async Home
@@ -60,7 +67,7 @@ class MagicianController:
         if d < 115 or d > 320:
             raise ValueError("Dobot out of range")
 
-        self.lastIndex = dType.SetPTPCmd(self.api, dType.PTPMode.PTPMOVLXYZMode, x, y, z, r, isQueued = 1)[0]
+        self.lastIndex = dType.SetPTPCmd(self.api, dType.PTPMode.PTPMOVJXYZMode, x, y, z, r, True)[0]
         if wait:
             self.wait()
 
