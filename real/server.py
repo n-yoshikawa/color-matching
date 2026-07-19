@@ -1,12 +1,15 @@
 import time
 import sys
 import csv
+import json
 import os
 import shutil
 import sys
+from pathlib import Path
 
 import cv2
 import numpy as np
+from math import isfinite
 from PIL import Image as PILImage
 from skimage import color as skimage_color
 from fastmcp import FastMCP
@@ -24,6 +27,12 @@ import nimo
 
 ROWS, COLS = 3, 4
 SAMPLE_FRAC = 0.27   # 平均を取る円の半径 / ピッチ
+PIPETTE_CAPACITY_UL = 1000.0
+MIX_WELL_CAPACITY_UL = 3000.0
+COLOR_WELLS_PATH = Path(__file__).resolve().parent.parent / "config" / "color_wells.json"
+with COLOR_WELLS_PATH.open(encoding="utf-8") as file:
+    COLOR_WELLS = {int(well): color for well, color in json.load(file).items()}
+
 
 def well_centers(cx, cy, p):
     co = (np.arange(COLS) - (COLS - 1) / 2) * p
@@ -44,7 +53,8 @@ class ExperimentResult(BaseModel):
     well: int
     recipe: ColorRecipe
 
-class MySDL:   
+
+class MySDL:
     def __init__(self):
         self.consumption = {"blue": 0, "yellow": 0, "red": 0}
         self.filled_wells = {}
@@ -61,50 +71,84 @@ class MySDL:
         self.cx = 640
         self.cy = 360
         self.p = 117
-    
-    def initialize(self):
-        self.return_home()
 
-    def return_home(self) -> str:
+        # Minimal commanded state used for validation and structured MCP results.
+        self.location_kind = "home"
+        self.location_index: int | None = None
+        self.pipette_volume_ul = 0.0
+
+    def initialize(self) -> dict[str, Any]:
+        """Move to home without resetting physical experiment state."""
+        try:
+            self.dobot.move_arm(self.home_pose[0], self.home_pose[1], self.home_pose[2])
+        except Exception as exc:
+            raise ToolError(f"failed to initialize: {exc}") from exc
+        self.location_kind = "home"
+        self.location_index = None
+        return self._success("initialize")
+
+    def return_home(self) -> dict[str, Any]:
         """
         Move the robot arm to its predefined home position.
         """
         try:
             self.dobot.move_arm(self.home_pose[0], self.home_pose[1], self.home_pose[2])
-            return "robot returned home successfully"
-        except Exception as e:
-            print(e)
-            return f"failed to return home, error: {e}"
+        except Exception as exc:
+            raise ToolError(f"failed to return home: {exc}") from exc
+        self.location_kind = "home"
+        self.location_index = None
+        return self._success("return_home")
 
-    def move_color_well(self, i: int) -> str:
+    def move_color_well(self, well: int) -> dict[str, Any]:
         """
         Move the robot on the color well specified by an integer (0-indexed).
         """
-        x = 217 - 39 * (i // 3)
-        y = -112 - 39 * (i % 3)
+        if well not in COLOR_WELLS:
+            raise ToolError("color well must be between 0 and 5")
+
+        x = 217 - 39 * (well // 3)
+        y = -112 - 39 * (well % 3)
         try:
             self.dobot.move_arm(z=self.z_home)
             self.dobot.move_arm(x=x, y=y)
-            return f"robot moved to color well {i}"
-        except Exception as e:
-            return f"failed to move to color well, error: {e}"
-    
-    def move_mix_well(self, i) -> str:
+        except Exception as exc:
+            raise ToolError(f"failed to move to color well {well}: {exc}") from exc
+
+        self.location_kind = "color_well"
+        self.location_index = well
+        return self._success("move_color_well")
+
+    def move_mix_well(self, well: int) -> dict[str, Any]:
         """
         Move the robot on the mix well specified by an integer (0-indexed).
         """
-        x = 217 - 25 * (i // 4)
-        y = 189 - 25 * (i % 4)
+        self._validate_mix_well(well)
+
+        x = 217 - 25 * (well // 4)
+        y = 189 - 25 * (well % 4)
         try:
             self.dobot.move_arm(z=self.z_home)
             joints = self.dobot.get_current_joints()
             self.dobot.move_arm(x=x, y=y)
-            return f"robot moved to mix well {i}"
-        except Exception as e:
-            print(e)
-            return f"failed to move to mix well, error: {e}"
+        except Exception as exc:
+            raise ToolError(f"failed to move to mix well {well}: {exc}") from exc
 
-    def aspirate(self, volume: float) -> str:
+        self.location_kind = "mix_well"
+        self.location_index = well
+        return self._success("move_mix_well")
+
+    def move_wash_station(self) -> dict[str, Any]:
+        """Move to the wash station, which is physically the home position."""
+        try:
+            self.dobot.move_arm(self.home_pose[0], self.home_pose[1], self.home_pose[2])
+        except Exception as exc:
+            raise ToolError(f"failed to move to wash station: {exc}") from exc
+
+        self.location_kind = "wash_station"
+        self.location_index = None
+        return self._success("move_wash_station")
+
+    def aspirate(self, volume_ul: float) -> dict[str, Any]:
         """
         Aspirate the specified liquid volume.
 
@@ -112,18 +156,25 @@ class MySDL:
         and returns to the home Z position.
 
         Args:
-          volume: Liquid volume to aspirate.
+          volume_ul: Liquid volume to aspirate.
         """
+        self._validate_volume(volume_ul)
+        if self.location_kind not in {"color_well", "mix_well", "wash_station"}:
+            raise ToolError("aspirate requires a liquid-containing location")
+        if self.pipette_volume_ul + volume_ul > PIPETTE_CAPACITY_UL:
+            raise ToolError("requested volume exceeds the 1000 uL pipette capacity")
+
         try:
             self.dobot.move_arm(z=self.z_aspirate)
-            self.picus.aspirate(volume)
+            self.picus.aspirate(volume_ul)
             self.dobot.move_arm(z=self.z_home)
-            return f"robot aspirated {volume} uL"
-        except Exception as e:
-            print(e)
-            return f"robot failed to aspirate {volume} uL, error: {e}"
+        except Exception as exc:
+            raise ToolError(f"failed to aspirate {volume_ul} uL: {exc}") from exc
 
-    def dispense(self, volume: float) -> str:
+        self.pipette_volume_ul += volume_ul
+        return self._success("aspirate")
+
+    def dispense(self, volume_ul: float) -> dict[str, Any]:
         """
         Dispense the specified liquid volume.
 
@@ -131,17 +182,26 @@ class MySDL:
         and returns to the home Z position.
 
         Args:
-          volume: Liquid volume to dispense.
+          volume_ul: Liquid volume to dispense.
+
+        Dispensing includes blow out and must empty the pipette.
         """
+        self._validate_volume(volume_ul)
+        if self.location_kind not in {"mix_well", "wash_station"}:
+            raise ToolError("dispense requires a mix well or wash station")
+        if volume_ul != self.pipette_volume_ul:
+            raise ToolError("volume_ul must equal the current pipette volume")
+
         try:
             self.dobot.move_arm(z=self.z_dispense)
-            self.picus.dispense(volume)
+            self.picus.dispense(volume_ul)
             self.dobot.move_arm(z=self.z_home)
             self.picus.blow_out()
-            return f"robot dispensed {volume} uL"
-        except Exception as e:
-            print(e)
-            return f"robot failed to dispense {volume} uL, error: {e}"
+        except Exception as exc:
+            raise ToolError(f"failed to dispense {volume_ul} uL: {exc}") from exc
+
+        self.pipette_volume_ul = 0.0
+        return self._success("dispense")
     
     def wash_tip(self) -> str:
         """
@@ -162,8 +222,8 @@ class MySDL:
             return "robot washed the pipette tip successfully"
         except Exception as e:
             print(e)
-            return f"robot failed to wash the pipette tip, error: {e}" 
-        
+            return f"robot failed to wash the pipette tip, error: {e}"
+
     def add_color(self, color: str, well: int, volume: float, pipetting: bool = False) -> str:
         """
         Add specified amount (in mL) of color into 12-well plate.
@@ -204,7 +264,7 @@ class MySDL:
             self.picus.blow_out()
         self.wash_tip()
         return f"robot added {volume} uL of {color} into well {well} successfully"
-    
+
     def run_experiment(self, well: int, red: float, yellow: float, blue: float) -> ExperimentResult:
         """
         Run a color mix experiment.
@@ -215,7 +275,7 @@ class MySDL:
         for color, volume in {"red": red, "yellow": yellow, "blue": blue}.items():
             if not 0 <= volume <= 1:
                 raise ToolError(f"{color} must be between 0 and 255.")
-        
+
         if well in self.filled_wells.keys():
             raise ToolError(f"The well {well} is already filled.")
 
@@ -232,7 +292,7 @@ class MySDL:
             well=well,
             recipe=ColorRecipe(red=red, yellow=yellow, blue=blue),
         )
-    
+
     def get_image(self) -> Image:
         """
         Get image from camera
@@ -249,7 +309,7 @@ class MySDL:
         disp = cv2.resize(vis, (320, 180))
         cv2.imwrite("average.jpg", frame)
         return Image(path="average.jpg")
-    
+
     def get_well_color(self, frame, i):
         """与えられたフレームから、i番目(0..11)のウェルの平均色を(R,G,B)で返す。"""
         fx, fy = well_centers(self.cx, self.cy, self.p)[i]
@@ -276,24 +336,34 @@ class MySDL:
             cv2.rectangle(vis, (x0, y0), (x0 + 30, y0 + 30), (255, 255, 255), 1)
         return vis
 
-    def get_color_diff(self, well:int, hex: str) -> float:
+    def get_color_diff(self, well: int, hex: str) -> float:
         """Get the CIEDE 20000 color difference between the target hex color and the specified well.
         A return value of 0.0 means a perfect match; larger values mean the colors are further apart."""
+        self._validate_mix_well(well)
         target = 11
         ret, frame = self.cap.read()
         filename = datetime.now().strftime("%Y%m%d-%H%M%S.jpg")
         debug = self._draw_debug(frame)
         cv2.imwrite(filename, debug)
         if not ret:
-            raise RuntimeError("Failed to read frame from camera")
+            raise ToolError("Failed to read frame from camera")
         mean_rgb   = np.array(self.get_well_color(frame, well), dtype=float)
         # target_rgb = np.array(self.get_well_color(frame, target), dtype=float)
         hex_clean = hex.lstrip("#")
         if len(hex_clean) != 6:
             raise ToolError(f"Invalid hex color: '{hex}'. Expected 6 hex digits.")
+        try:
+            target_rgb = np.array(
+                (
+                    int(hex_clean[0:2], 16),
+                    int(hex_clean[2:4], 16),
+                    int(hex_clean[4:6], 16),
+                ),
+                dtype=float,
+            )
+        except ValueError as exc:
+            raise ToolError(f"Invalid hex color: '{hex}'. Expected 6 hex digits.") from exc
 
-        target_rgb = np.array((int(hex_clean[0:2], 16), int(hex_clean[2:4], 16), int(hex_clean[4:6], 16)), dtype=float)
-        
         diff = skimage_color.deltaE_ciede2000(
             skimage_color.rgb2lab(target_rgb.reshape(1, 1, 3) / 255.0),
             skimage_color.rgb2lab(mean_rgb.reshape(1, 1, 3) / 255.0),
@@ -301,13 +371,63 @@ class MySDL:
 
         return float(diff)
 
+    def get_state(self) -> dict[str, Any]:
+        """Return the minimal commanded state; this is not sensor confirmation."""
+        return {
+            "location": self._location(),
+            "pipette_volume_ul": self.pipette_volume_ul,
+        }
+
+    def get_labware_config(self) -> dict[str, Any]:
+        """Return static labware information needed to plan a protocol."""
+        return {
+            "units": "uL",
+            "pipette_capacity_ul": PIPETTE_CAPACITY_UL,
+            "mix_well_capacity_ul": MIX_WELL_CAPACITY_UL,
+            "color_wells": COLOR_WELLS,
+            "mix_wells": list(range(12)),
+            "wash_station": True,
+        }
+
+    def _validate_mix_well(self, well: int) -> None:
+        if not 0 <= well <= 11:
+            raise ToolError("mix well must be between 0 and 11")
+
+    @staticmethod
+    def _validate_volume(volume_ul: float) -> None:
+        if not isfinite(volume_ul) or volume_ul <= 0:
+            raise ToolError("volume_ul must be a finite number greater than 0")
+        if volume_ul > PIPETTE_CAPACITY_UL:
+            raise ToolError("volume_ul must not exceed the 1000 uL pipette capacity")
+
+    def _location(self) -> dict[str, Any]:
+        location: dict[str, Any] = {"kind": self.location_kind}
+        if self.location_index is not None:
+            location["index"] = self.location_index
+        return location
+
+    def _success(self, action: str) -> dict[str, Any]:
+        return {
+            "action": action,
+            "location": self._location(),
+            "pipette_volume_ul": self.pipette_volume_ul,
+        }
+
+
 if __name__ == "__main__":
     sdl = MySDL()
 
     # sdl.run_experiment(10, 0.1, 0.2, 0.3)
-    
+
     mcp = FastMCP("Self-driving laboratory controller")
     mcp.tool(sdl.initialize)
-    mcp.tool(sdl.run_experiment)
+    mcp.tool(sdl.return_home)
+    mcp.tool(sdl.move_color_well)
+    mcp.tool(sdl.move_mix_well)
+    mcp.tool(sdl.move_wash_station)
+    mcp.tool(sdl.aspirate)
+    mcp.tool(sdl.dispense)
+    mcp.tool(sdl.get_state)
+    mcp.tool(sdl.get_labware_config)
     mcp.tool(sdl.get_color_diff)
     mcp.run(transport="http", host="0.0.0.0", port=8001)
