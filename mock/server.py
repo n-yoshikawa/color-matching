@@ -191,6 +191,13 @@ class DigitalTwin:
         )
 
     def get_state(self) -> dict[str, Any]:
+        """Return the portable commanded state shared by both servers."""
+        return {
+            "location": self._location(),
+            "pipette_volume_ul": round(_volume(self.pipette_contents), 6),
+        }
+
+    def get_simulation_state(self) -> dict[str, Any]:
         """Return the observable state of the robot, pipette, and labware."""
         return {
             "location": self._location(),
@@ -356,6 +363,7 @@ mcp.tool(twin.dispense)
 mcp.tool(twin.mix_well)
 mcp.tool(twin.wash_tip)
 mcp.tool(twin.get_state)
+mcp.tool(twin.get_simulation_state)
 mcp.tool(twin.get_labware_config)
 mcp.tool(twin.get_color_diff)
 

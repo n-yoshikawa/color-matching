@@ -46,11 +46,13 @@ Both servers expose:
 | `move_wash_station()` | Move to the semantic wash location. |
 | `aspirate(volume_ul)` | Aspirate at the current liquid-containing location. |
 | `dispense(volume_ul)` | Dispense the entire pipette volume and blow out. |
-| `get_state()` | Return location and commanded/simulated liquid state. |
+| `mix_well(volume_ul, cycles)` | Mix the current destination well. |
+| `wash_tip(volume_ul, cycles)` | Move to the wash station and wash the empty tip. |
+| `get_state()` | Return the portable location and pipette-volume state. |
 | `get_labware_config()` | Return units, capacities, and well mappings. |
 | `get_color_diff(well, hex)` | Return CIEDE2000 distance from a target color. |
 
-Only the Mock server exposes `reset_simulation()`. It restores initial source volumes, empties the pipette and destination wells, returns to home, and restarts the trace. There is deliberately no equivalent operation for physical hardware.
+Only the Mock server exposes `reset_simulation()` and `get_simulation_state()`. The former restores initial source volumes, empties the pipette and destination wells, returns to home, and restarts the trace. The latter returns detailed simulated pipette and well contents. There are deliberately no equivalent operations for physical hardware.
 
 All volumes use microliters (`uL`):
 
@@ -72,19 +74,25 @@ Both servers load this mapping from `config/color_wells.json`. Changing that fil
 
 ## Known Mock/Real alignment gaps
 
-The public tool names and input parameters are aligned, apart from the Mock-only `reset_simulation()`. The following behavioral differences remain open design decisions:
+The public tool names and input parameters are aligned, apart from the Mock-only `reset_simulation()` and `get_simulation_state()`. The following behavioral differences remain open design decisions:
 
-- **`get_state()` response:** Mock returns pipette composition, source-well state, and destination-well state. Real returns only semantic location and commanded pipette volume. A client that parses Mock's detailed state is therefore not portable yet. Check [Example `get_state()` responses](#example-get_state-responses).
 - **Liquid and capacity enforcement:** Mock tracks source depletion, rejects aspiration from an empty well, and enforces the `3000 uL` destination capacity. Real does not have sensors for these values and currently does not enforce them. Source-well usable capacity is also not included in `get_labware_config()`.
-- **Mixing and washing motion:** Mock validates only semantic action order. Real uses physical Z positions, and composing `aspirate()` plus `dispense()` does not exactly reproduce the continuous motions in the legacy `add_color()` and `wash_tip()` methods.
 - **Color evaluation:** Mock predicts RGB from a deterministic mixing model. Real samples the camera, so CIEDE2000 results are expected to differ. This is acceptable however given digital twin.
-- **Volume comparison:** Mock uses a small floating-point tolerance when checking that dispensing empties the pipette. Real currently uses exact numeric equality.
 
-These gaps should be resolved before protocols that depend on detailed Mock state are treated as directly portable to physical hardware.
+Portable protocols should use `get_state()` and must not depend on the Mock-only detailed simulation state.
 
-### Example `get_state()` responses
+### State responses
 
-After transferring `200 uL` of red liquid from source well `2` to mix well `3`, Mock returns detailed simulated liquid state. The example is abbreviated because the actual response includes all six source wells and all twelve mix wells:
+For the same commanded action sequence, both servers return the same minimal `get_state()` structure:
+
+```json
+{
+  "location": {"kind": "mix_well", "index": 3},
+  "pipette_volume_ul": 0
+}
+```
+
+Mock's `get_simulation_state()` returns additional simulated liquid state. The example is abbreviated because the actual response includes all six source wells and all twelve mix wells:
 
 ```jsonc
 {
@@ -112,16 +120,7 @@ After transferring `200 uL` of red liquid from source well `2` to mix well `3`, 
 }
 ```
 
-For the same commanded action sequence, Real returns only the state it tracks locally:
-
-```json
-{
-  "location": {"kind": "mix_well", "index": 3},
-  "pipette_volume_ul": 0
-}
-```
-
-The Real response does not confirm that the physical aspiration or dispensing succeeded; it only reports the state implied by successfully completed commands.
+The Real response does not confirm that physical aspiration or dispensing succeeded; it only reports the state implied by successfully completed commands.
 
 ## Installation
 
@@ -161,7 +160,7 @@ After configuring and connecting the Dobot, Picus, and camera:
 uv run real/server.py
 ```
 
-The endpoint and shared action signatures are the same as the Mock endpoint. Protocols that do not parse the server-specific `get_state()` response can switch endpoints without changing their action calls. Do not run the Mock and Real servers on the same port at the same time.
+The endpoint and shared action signatures are the same as the Mock endpoint. Portable protocols can switch endpoints without changing their action calls. Do not run the Mock and Real servers on the same port at the same time.
 
 Before a physical run:
 

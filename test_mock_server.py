@@ -15,7 +15,7 @@ def test_atomic_actions_transfer_liquid_from_source_to_mix_well():
     twin.move_mix_well(3)
     twin.dispense(200)
 
-    state = twin.get_state()
+    state = twin.get_simulation_state()
     assert state["color_wells"][2] == {
         "volume_ul": 5800.0,
         "contents": {"red": 5800.0},
@@ -34,7 +34,7 @@ def test_multiple_dispenses_can_build_a_recipe_in_the_same_well():
         twin.move_mix_well(4)
         twin.dispense(volume_ul)
 
-    well = twin.get_state()["mix_wells"][4]
+    well = twin.get_simulation_state()["mix_wells"][4]
     assert well["volume_ul"] == 1000
     assert well["contents"] == {
         "blue": 500.0,
@@ -50,7 +50,7 @@ def test_dispense_requires_the_entire_pipette_volume():
     with pytest.raises(ToolError, match="DispenseMustEmptyPipette"):
         twin.dispense(150)
 
-    state = twin.get_state()
+    state = twin.get_simulation_state()
     assert state["pipette"]["contents"] == {"red": 200.0}
     assert state["mix_wells"][0]["volume_ul"] == 0
 
@@ -63,8 +63,19 @@ def test_wash_station_dispense_includes_blow_out():
     result = twin.dispense(1000)
 
     assert result["pipette_volume_ul"] == 0
-    assert twin.get_state()["pipette"]["volume_ul"] == 0
+    assert twin.get_state()["pipette_volume_ul"] == 0
     assert twin.get_action_trace()[-1]["arguments"] == {"volume_ul": 1000}
+
+
+def test_get_state_returns_only_the_portable_state():
+    twin = DigitalTwin()
+    twin.move_color_well(2)
+    twin.aspirate(200)
+
+    assert twin.get_state() == {
+        "location": {"kind": "color_well", "index": 2},
+        "pipette_volume_ul": 200,
+    }
 
 
 def test_mix_well_preserves_liquid_contents():
@@ -74,11 +85,11 @@ def test_mix_well_preserves_liquid_contents():
     twin.move_mix_well(3)
     twin.dispense(200)
 
-    contents_before = twin.get_state()["mix_wells"][3]
+    contents_before = twin.get_simulation_state()["mix_wells"][3]
     result = twin.mix_well(150, cycles=3)
 
     assert result["location"] == {"kind": "mix_well", "index": 3}
-    assert twin.get_state()["mix_wells"][3] == contents_before
+    assert twin.get_simulation_state()["mix_wells"][3] == contents_before
     assert twin.get_action_trace()[-1]["arguments"] == {
         "volume_ul": 150,
         "cycles": 3,
@@ -107,7 +118,7 @@ def test_initialize_only_returns_home_without_resetting_liquids_or_trace():
 
     twin.initialize()
 
-    state = twin.get_state()
+    state = twin.get_simulation_state()
     assert state["location"] == {"kind": "home"}
     assert state["pipette"]["contents"] == {"red": 200.0}
     assert state["color_wells"][2]["contents"] == {"red": 5800.0}
@@ -122,7 +133,7 @@ def test_reset_simulation_restores_initial_state_and_restarts_trace():
 
     twin.reset_simulation()
 
-    state = twin.get_state()
+    state = twin.get_simulation_state()
     assert state["location"] == {"kind": "home"}
     assert state["pipette"]["volume_ul"] == 0
     assert state["color_wells"][2]["contents"] == {"red": 6000.0}
@@ -148,12 +159,12 @@ def test_invalid_actions_raise_tool_errors_without_changing_liquid_state():
 
     twin.move_color_well(2)
     twin.aspirate(800)
-    source_before = twin.get_state()["color_wells"][2]
+    source_before = twin.get_simulation_state()["color_wells"][2]
 
     with pytest.raises(ToolError, match="PipetteOverflow"):
         twin.aspirate(300)
 
-    assert twin.get_state()["color_wells"][2] == source_before
+    assert twin.get_simulation_state()["color_wells"][2] == source_before
 
 
 def test_action_trace_records_successful_actions_in_order():
@@ -191,6 +202,7 @@ def test_mcp_exposes_atomic_actions_but_not_composite_protocols():
         "mix_well",
         "wash_tip",
         "get_state",
+        "get_simulation_state",
         "get_labware_config",
         "get_color_diff",
     }
@@ -206,10 +218,12 @@ def test_atomic_actions_execute_through_mcp():
             await client.call_tool("dispense", {"volume_ul": 125})
             await client.call_tool("mix_well", {"volume_ul": 100, "cycles": 2})
             await client.call_tool("wash_tip")
-            return await client.call_tool("get_state")
+            state = await client.call_tool("get_state")
+            simulation_state = await client.call_tool("get_simulation_state")
+            return state, simulation_state
 
-    result = asyncio.run(transfer_liquid())
+    result, simulation_result = asyncio.run(transfer_liquid())
 
-    assert result.data["pipette"]["volume_ul"] == 0
-    assert result.data["mix_wells"]["6"]["contents"] == {"red": 125.0}
     assert result.data["location"] == {"kind": "wash_station"}
+    assert result.data["pipette_volume_ul"] == 0
+    assert simulation_result.data["mix_wells"]["6"]["contents"] == {"red": 125.0}

@@ -30,8 +30,7 @@ ROWS, COLS = 3, 4
 SAMPLE_FRAC = 0.2
 PIPETTE_CAPACITY_UL = 1000.0
 MIX_WELL_CAPACITY_UL = 3000.0
-# COLOR_WELLS_PATH = Path(__file__).resolve().parent.parent / "config" / "color_wells.json"
-COLOR_WELLS_PATH = Path(__file__).resolve().parent / "config" / "color_wells.json"
+COLOR_WELLS_PATH = Path(__file__).resolve().parent.parent / "config" / "color_wells.json"
 
 with COLOR_WELLS_PATH.open(encoding="utf-8") as file:
     COLOR_WELLS = {int(well): color for well, color in json.load(file).items()}
@@ -91,6 +90,7 @@ class MySDL:
                 self.picus.dispense(self.pipette_volume_ul)
         except Exception as exc:
             raise ToolError(f"failed to initialize: {exc}") from exc
+        self.pipette_volume_ul = 0.0
         self.location_kind = "home"
         self.location_index = None
         return self._success("initialize")
@@ -212,7 +212,7 @@ class MySDL:
         self._validate_volume(volume_ul)
         if self.location_kind not in {"mix_well", "wash_station"}:
             raise ToolError("dispense requires a mix well or wash station")
-        if volume_ul != self.pipette_volume_ul:
+        if abs(self.pipette_volume_ul - volume_ul) > 1e-9:
             raise ToolError("volume_ul must equal the current pipette volume")
 
         try:
@@ -418,7 +418,7 @@ class MySDL:
         return float(diff)
 
     def get_state(self) -> dict[str, Any]:
-        """Return the minimal commanded state; this is not sensor confirmation."""
+        """Return the portable commanded state shared by both servers."""
         return {
             "location": self._location(),
             "pipette_volume_ul": self.pipette_volume_ul,
