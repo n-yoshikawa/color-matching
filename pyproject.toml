@@ -1,0 +1,18 @@
+[project]
+name = "color-matching"
+version = "0.1.0"
+description = "A FastMCP color-matching self-driving laboratory example"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "fastmcp",
+    "numpy",
+    "opencv-python",
+    "pillow",
+    "pydantic",
+    "pyserial",
+    "scikit-image",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.0"]

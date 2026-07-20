@@ -30,8 +30,7 @@ ROWS, COLS = 3, 4
 SAMPLE_FRAC = 0.2
 PIPETTE_CAPACITY_UL = 1000.0
 MIX_WELL_CAPACITY_UL = 3000.0
-# COLOR_WELLS_PATH = Path(__file__).resolve().parent.parent / "config" / "color_wells.json"
-COLOR_WELLS_PATH = Path(__file__).resolve().parent / "config" / "color_wells.json"
+COLOR_WELLS_PATH = Path(__file__).resolve().parent.parent / "config" / "color_wells.json"
 
 with COLOR_WELLS_PATH.open(encoding="utf-8") as file:
     COLOR_WELLS = {int(well): color for well, color in json.load(file).items()}
@@ -91,6 +90,7 @@ class MySDL:
                 self.picus.dispense(self.pipette_volume_ul)
         except Exception as exc:
             raise ToolError(f"failed to initialize: {exc}") from exc
+        self.pipette_volume_ul = 0.0
         self.location_kind = "home"
         self.location_index = None
         return self._success("initialize")
@@ -212,7 +212,7 @@ class MySDL:
         self._validate_volume(volume_ul)
         if self.location_kind not in {"mix_well", "wash_station"}:
             raise ToolError("dispense requires a mix well or wash station")
-        if volume_ul != self.pipette_volume_ul:
+        if abs(self.pipette_volume_ul - volume_ul) > 1e-9:
             raise ToolError("volume_ul must equal the current pipette volume")
 
         try:
@@ -225,29 +225,57 @@ class MySDL:
 
         self.pipette_volume_ul = 0.0
         return self._success("dispense")
-    
-    def wash_tip(self) -> str:
-        """
-        Wash the pipette tip.
 
-        Call this function after dispensing in mix well.
-        """
+    def mix_well(self, volume_ul: float, cycles: int = 1) -> dict[str, Any]:
+        """Mix liquid in the current mix well by repeated aspiration and dispensing."""
+        self._validate_volume(volume_ul)
+        if not 1 <= cycles <= 10:
+            raise ToolError("cycles must be between 1 and 10")
+        if self.location_kind != "mix_well":
+            raise ToolError("mix_well requires the robot to be at a mix well")
+        if self.pipette_volume_ul != 0:
+            raise ToolError("mix_well requires an empty pipette")
         if self.dobot.get_alarms() != 0:
-            raise ToolError(f"robot is in alarm state. Please initialize.")
-        vol = 1000
+            raise ToolError("robot is in alarm state. Please initialize.")
+
         try:
-            self.dobot.move_arm(z=self.z_home)
-            self.return_home()
-            self.dobot.move_arm(z=self.z_aspirate)
-            for _ in range(1):
-                self.picus.aspirate(vol)
-                self.picus.dispense(vol)
+            self.dobot.move_arm(z=self.z_aspirate + 1.0)
+            for _ in range(cycles):
+                self.picus.aspirate(volume_ul)
+                self.picus.dispense(volume_ul)
             self.dobot.move_arm(z=self.z_home)
             self.picus.blow_out()
-            return "robot washed the pipette tip successfully"
-        except Exception as e:
-            print(e)
-            return f"robot failed to wash the pipette tip, error: {e}"
+        except Exception as exc:
+            raise ToolError(f"failed to mix current well: {exc}") from exc
+
+        return self._success("mix_well")
+
+    def wash_tip(
+        self,
+        volume_ul: float = 1000.0,
+        cycles: int = 1,
+    ) -> dict[str, Any]:
+        """Move to the wash station and wash the empty pipette tip."""
+        self._validate_volume(volume_ul)
+        if not 1 <= cycles <= 10:
+            raise ToolError("cycles must be between 1 and 10")
+        if self.pipette_volume_ul != 0:
+            raise ToolError("wash_tip requires an empty pipette")
+        if self.dobot.get_alarms() != 0:
+            raise ToolError("robot is in alarm state. Please initialize.")
+
+        try:
+            self.move_wash_station()
+            self.dobot.move_arm(z=self.z_aspirate)
+            for _ in range(cycles):
+                self.picus.aspirate(volume_ul)
+                self.picus.dispense(volume_ul)
+            self.dobot.move_arm(z=self.z_home)
+            self.picus.blow_out()
+        except Exception as exc:
+            raise ToolError(f"failed to wash pipette tip: {exc}") from exc
+
+        return self._success("wash_tip")
 
     def add_color(self, color: str, well: int, volume: float, pipetting: bool = False) -> str:
         """
@@ -282,11 +310,7 @@ class MySDL:
             self.consumption[color] += add_volume
             remaining_volume -= add_volume
         if pipetting:
-            self.dobot.move_arm(z=self.z_aspirate+1.0)
-            self.picus.aspirate(1000)
-            self.picus.dispense(1000)
-            self.dobot.move_arm(z=self.z_home)
-            self.picus.blow_out()
+            self.mix_well(1000)
         self.wash_tip()
         return f"robot added {volume} uL of {color} into well {well} successfully"
 
@@ -394,7 +418,7 @@ class MySDL:
         return float(diff)
 
     def get_state(self) -> dict[str, Any]:
-        """Return the minimal commanded state; this is not sensor confirmation."""
+        """Return the portable commanded state shared by both servers."""
         return {
             "location": self._location(),
             "pipette_volume_ul": self.pipette_volume_ul,
@@ -449,6 +473,8 @@ if __name__ == "__main__":
     mcp.tool(sdl.move_wash_station)
     mcp.tool(sdl.aspirate)
     mcp.tool(sdl.dispense)
+    mcp.tool(sdl.mix_well)
+    mcp.tool(sdl.wash_tip)
     mcp.tool(sdl.get_state)
     mcp.tool(sdl.get_labware_config)
     mcp.tool(sdl.get_color_diff)
