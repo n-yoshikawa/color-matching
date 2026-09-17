@@ -6,7 +6,7 @@ sys.path.append('C:\\Users\\nims\\Desktop\\demo-magician-python')
 import DobotDllType as dType
 
 class MagicianController:
-    def __init__(self, COM="COM8"):
+    def __init__(self, COM="COM5"):
         #Load Dll and get the CDLL object
         self.api = dType.load()
         self.lastIndex = -1
